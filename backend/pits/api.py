@@ -1,9 +1,15 @@
+from django.db import transaction
 from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError
 
 from pits.auth import BearerAuth, make_token
 from pits.models import Pit, User, Yard
-from pits.rules import RuleError, assert_can_set_status, latest_ph
+from pits.rules import (
+    RuleError,
+    assert_can_add_sample,
+    assert_can_set_status,
+    latest_ph,
+)
 
 api = NinjaAPI(title="TanPit", urls_namespace="tanpit")
 auth = BearerAuth()
@@ -64,32 +70,37 @@ def board(request):
 
 @api.post("/pits/{pit_id}/samples", auth=auth)
 def add_sample(request, pit_id: int, payload: SampleIn):
-    pit = Pit.objects.filter(id=pit_id).prefetch_related("samples").first()
-    if pit is None:
-        raise HttpError(404, "坑不存在")
-    target = pit
-    if pit.status == Pit.STATUS_DRAINED:
-        neighbor = (
-            Pit.objects.filter(yard_id=pit.yard_id, row=pit.row + 1, col=pit.col)
+    # 只认坑本身：已放液坑禁止再补酸碱，绝不转发到邻行。
+    # 行锁内复查坑态，两名工并发补同一已放液坑时两笔都落空。
+    with transaction.atomic():
+        pit = (
+            Pit.objects.select_for_update()
             .prefetch_related("samples")
+            .filter(id=pit_id)
             .first()
         )
-        if neighbor is not None:
-            target = neighbor
-    target.samples.create(ph=payload.ph, operator=request.auth.username)
-    pit.refresh_from_db()
-    return pit_json(pit)
+        if pit is None:
+            raise HttpError(404, "坑不存在")
+        try:
+            assert_can_add_sample(pit)
+        except RuleError as exc:
+            raise HttpError(400, str(exc))
+        pit.samples.create(ph=payload.ph, operator=request.auth.username)
+        pit.refresh_from_db()
+        return pit_json(pit)
 
 
 @api.post("/pits/{pit_id}/status", auth=auth)
 def set_status(request, pit_id: int, payload: StatusIn):
-    pit = Pit.objects.filter(id=pit_id).first()
-    if pit is None:
-        raise HttpError(404, "坑不存在")
-    try:
-        assert_can_set_status(pit, payload.status)
-    except RuleError as exc:
-        raise HttpError(400, str(exc))
-    pit.status = payload.status
-    pit.save(update_fields=["status"])
+    # 改坑态只动这一口；锁内复查，避免与补酸碱 / 并发改态串写。
+    with transaction.atomic():
+        pit = Pit.objects.select_for_update().filter(id=pit_id).first()
+        if pit is None:
+            raise HttpError(404, "坑不存在")
+        try:
+            assert_can_set_status(pit, payload.status)
+        except RuleError as exc:
+            raise HttpError(400, str(exc))
+        pit.status = payload.status
+        pit.save(update_fields=["status"])
     return pit_json(pit)

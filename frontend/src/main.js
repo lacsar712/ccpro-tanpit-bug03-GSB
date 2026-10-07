@@ -58,8 +58,9 @@ class TanYard extends LitElement {
   async refresh() {
     try {
       this.board = await api("/api/board");
+      // 票夹只按坑 id 认同一口；刷新后若该坑不在台账里，宁可空夹也不错配到首坑。
       if (this.picked) {
-        this.picked = this.board.pits.find((p) => p.id === this.picked.id) || this.board.pits[0];
+        this.picked = this.board.pits.find((p) => p.id === this.picked.id) || null;
       }
     } catch (e) {
       this.err = e.message;
