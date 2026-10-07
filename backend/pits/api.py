@@ -67,16 +67,9 @@ def add_sample(request, pit_id: int, payload: SampleIn):
     pit = Pit.objects.filter(id=pit_id).prefetch_related("samples").first()
     if pit is None:
         raise HttpError(404, "坑不存在")
-    target = pit
     if pit.status == Pit.STATUS_DRAINED:
-        neighbor = (
-            Pit.objects.filter(yard_id=pit.yard_id, row=pit.row + 1, col=pit.col)
-            .prefetch_related("samples")
-            .first()
-        )
-        if neighbor is not None:
-            target = neighbor
-    target.samples.create(ph=payload.ph, operator=request.auth.username)
+        raise HttpError(400, "该坑已放液，禁止再落酸碱")
+    pit.samples.create(ph=payload.ph, operator=request.auth.username)
     pit.refresh_from_db()
     return pit_json(pit)
 
